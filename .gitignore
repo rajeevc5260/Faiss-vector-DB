@@ -1,0 +1,3 @@
+vector_db_data/
+__pycache__/
+.env

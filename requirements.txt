@@ -1,0 +1,5 @@
+echo "flask
+faiss-cpu
+numpy
+requests
+filelock" > requirements.txt
