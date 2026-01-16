@@ -2,28 +2,43 @@ import os
 import json
 import time
 import tempfile
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple
 
 import numpy as np
-import requests
 import faiss
 from flask import Flask, request, jsonify
 from filelock import FileLock
+
+#  CLIP (local, free image+text embeddings)
+import torch
+from PIL import Image
+from transformers import CLIPProcessor, CLIPModel
 
 #  CONFIG 
 
 DATA_DIR = os.environ.get("VECTOR_DB_DIR", "./vector_db_data")
 NS_DIR = os.path.join(DATA_DIR, "namespaces")
 
-MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
-MISTRAL_EMBED_URL = os.environ.get("MISTRAL_EMBED_URL", "https://api.mistral.ai/v1/embeddings")
-MISTRAL_MODEL = os.environ.get("MISTRAL_EMBED_MODEL", "mistral-embed")  # 1024-dim text embeddings
+# Use CLIP for BOTH text + images (one shared embedding space)
+CLIP_MODEL_NAME = os.environ.get("CLIP_MODEL_NAME", "laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+
 DEFAULT_TOP_K = 5
 
-# For mistral-embed: dim = 1024 (docs)
+# CLIP ViT-L/14 embeddings dim
 DEFAULT_DIM = 1024
 
 app = Flask(__name__)
+
+#  CLIP MODEL (LOAD ONCE) 
+
+clip_model = CLIPModel.from_pretrained(CLIP_MODEL_NAME)
+clip_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME)
+clip_model.eval()
+
+# runs on CPU by default
+# You can set device="cuda" manually if GPU is available
+DEVICE = os.environ.get("CLIP_DEVICE", "cpu")
+clip_model.to(DEVICE)
 
 
 #  DISK-SAFE HELPERS 
@@ -96,9 +111,9 @@ def load_or_create_namespace(namespace: str) -> Tuple[faiss.Index, Dict[str, Any
 
     meta = read_json(paths["meta"], default={
         "dim": DEFAULT_DIM,
-        "model": MISTRAL_MODEL,
+        "model": CLIP_MODEL_NAME,
         "next_int_id": 1,
-        "docs": {}  # user_id -> {int_id, text, metadata, created_at, updated_at}
+        "docs": {}  # user_id -> {int_id, type, metadata, created_at, updated_at, text_optional}
     })
 
     if os.path.exists(paths["index"]):
@@ -114,44 +129,29 @@ def persist_namespace(index: faiss.Index, meta: Dict[str, Any], paths: Dict[str,
     save_index(index, paths["index"])
     atomic_write_json(paths["meta"], meta)
 
-#  MISTRAL EMBEDDINGS 
+#  CLIP EMBEDDINGS 
 
-def mistral_embed_texts(texts: List[str]) -> np.ndarray:
-    if not MISTRAL_API_KEY:
-        raise RuntimeError("MISTRAL_API_KEY is not set")
+def clip_embed_text(text: str) -> np.ndarray:
+    inputs = clip_processor(text=[text], return_tensors="pt", padding=True).to(DEVICE)
+    with torch.no_grad():
+        vec = clip_model.get_text_features(**inputs)
+    vec = vec / vec.norm(p=2, dim=-1, keepdim=True)
+    return vec.cpu().numpy().astype("float32")
 
-    payload = {
-        "model": MISTRAL_MODEL,
-        "input": texts
-    }
-    headers = {
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    r = requests.post(MISTRAL_EMBED_URL, headers=headers, json=payload, timeout=60)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Mistral embeddings error: {r.status_code} {r.text}")
-
-    data = r.json()
-    # Mistral returns embeddings under data[i].embedding (per docs/cookbooks)
-    vectors = [item["embedding"] for item in data["data"]]
-    arr = np.array(vectors, dtype="float32")
-
-    # Normalize for cosine similarity with IP index
-    faiss.normalize_L2(arr)
-    return arr
-
-def mistral_embed_one(text: str) -> np.ndarray:
-    return mistral_embed_texts([text])[0:1]
+def clip_embed_image(file_storage) -> np.ndarray:
+    img = Image.open(file_storage.stream).convert("RGB")
+    inputs = clip_processor(images=img, return_tensors="pt").to(DEVICE)
+    with torch.no_grad():
+        vec = clip_model.get_image_features(**inputs)
+    vec = vec / vec.norm(p=2, dim=-1, keepdim=True)
+    return vec.cpu().numpy().astype("float32")
 
 #  CORE OPS 
 
-def upsert_doc(index: faiss.Index, meta: Dict[str, Any], user_id: str, text: str, doc_meta: Dict[str, Any]) -> Dict[str, Any]:
+def upsert_vector(index: faiss.Index, meta: Dict[str, Any], user_id: str, vec: np.ndarray, doc_type: str, doc_meta: Dict[str, Any], text_optional: str = "") -> Dict[str, Any]:
     docs = meta["docs"]
     dim = int(meta["dim"])
 
-    vec = mistral_embed_one(text)
     if vec.shape[1] != dim:
         raise RuntimeError(f"Embedding dim mismatch: got {vec.shape[1]} expected {dim}")
 
@@ -161,8 +161,10 @@ def upsert_doc(index: faiss.Index, meta: Dict[str, Any], user_id: str, text: str
         sel = faiss.IDSelectorBatch(np.array([old_int_id], dtype="int64"))
         index.remove_ids(sel)
 
-        docs[user_id]["text"] = text
+        docs[user_id]["type"] = doc_type
         docs[user_id]["metadata"] = doc_meta
+        if text_optional:
+            docs[user_id]["text"] = text_optional
         docs[user_id]["updated_at"] = now_ms()
 
         new_int_id = old_int_id
@@ -172,7 +174,8 @@ def upsert_doc(index: faiss.Index, meta: Dict[str, Any], user_id: str, text: str
 
         docs[user_id] = {
             "int_id": new_int_id,
-            "text": text,
+            "type": doc_type,              # "text" | "image"
+            "text": text_optional or "",    # only for text inserts (optional)
             "metadata": doc_meta,
             "created_at": now_ms(),
             "updated_at": now_ms(),
@@ -192,7 +195,7 @@ def delete_doc(index: faiss.Index, meta: Dict[str, Any], user_id: str) -> bool:
     return True
 
 def search_docs(index: faiss.Index, meta: Dict[str, Any], query: str, top_k: int) -> List[Dict[str, Any]]:
-    q = mistral_embed_one(query)
+    q = clip_embed_text(query)
     D, I = index.search(q, top_k)
 
     # Reverse map int_id -> user_id (we store only user_id -> int_id)
@@ -211,7 +214,8 @@ def search_docs(index: faiss.Index, meta: Dict[str, Any], query: str, top_k: int
         results.append({
             "id": uid,
             "score": float(score),
-            "text": rec["text"],
+            "type": rec.get("type"),
+            "text": rec.get("text", ""),
             "metadata": rec.get("metadata", {}),
             "created_at": rec.get("created_at"),
             "updated_at": rec.get("updated_at"),
@@ -229,7 +233,7 @@ def create_namespace():
     body = request.get_json(force=True) or {}
     namespace = body.get("namespace", "default")
     dim = int(body.get("dim", DEFAULT_DIM))
-    model = body.get("model", MISTRAL_MODEL)
+    model = body.get("model", CLIP_MODEL_NAME)
 
     index, meta, paths = load_or_create_namespace(namespace)
     lock = FileLock(paths["lock"])
@@ -257,6 +261,40 @@ def list_namespaces():
 
 @app.post("/insert")
 def insert():
+    # NOTE: supports BOTH:
+    # - JSON text insert (application/json)
+    # - multipart image insert (form-data)
+    ct = (request.content_type or "").lower()
+
+    if "multipart/form-data" in ct:
+        namespace = request.form.get("namespace", "default")
+        user_id = request.form.get("id")
+        image = request.files.get("image")
+        text = request.form.get("text")  # optional
+        doc_meta_raw = request.form.get("metadata")  # optional JSON string
+        doc_meta = json.loads(doc_meta_raw) if doc_meta_raw else {}
+        if not user_id or not isinstance(user_id, str):
+            return jsonify({"error": "id is required (string)"}), 400
+        if image is None and (text is None or not str(text).strip()):
+            return jsonify({"error": "provide image or text"}), 400
+
+        index, meta, paths = load_or_create_namespace(namespace)
+        lock = FileLock(paths["lock"])
+        with lock:
+            try:
+                if image is not None:
+                    vec = clip_embed_image(image)
+                    out = upsert_vector(index, meta, user_id, vec, "image", doc_meta, text_optional="")
+                else:
+                    vec = clip_embed_text(str(text))
+                    out = upsert_vector(index, meta, user_id, vec, "text", doc_meta, text_optional=str(text))
+                persist_namespace(index, meta, paths)
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+        return jsonify({"namespace": namespace, "result": out})
+
+    # Default: JSON for text-only
     body = request.get_json(force=True) or {}
     namespace = body.get("namespace", "default")
     user_id = body.get("id")
@@ -273,7 +311,8 @@ def insert():
 
     with lock:
         try:
-            out = upsert_doc(index, meta, user_id, text, doc_meta)
+            vec = clip_embed_text(text)
+            out = upsert_vector(index, meta, user_id, vec, "text", doc_meta, text_optional=text)
             persist_namespace(index, meta, paths)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -297,7 +336,8 @@ def update(user_id: str):
         if user_id not in meta["docs"]:
             return jsonify({"error": "not found"}), 404
         try:
-            out = upsert_doc(index, meta, user_id, text, doc_meta)
+            vec = clip_embed_text(text)
+            out = upsert_vector(index, meta, user_id, vec, "text", doc_meta, text_optional=text)
             persist_namespace(index, meta, paths)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -318,7 +358,8 @@ def get_vector(user_id: str):
             "namespace": namespace,
             "id": user_id,
             "int_id": rec["int_id"],
-            "text": rec["text"],
+            "type": rec.get("type"),
+            "text": rec.get("text", ""),
             "metadata": rec.get("metadata", {}),
             "created_at": rec.get("created_at"),
             "updated_at": rec.get("updated_at"),
@@ -336,6 +377,7 @@ def list_vectors():
             items.append({
                 "id": uid,
                 "int_id": rec["int_id"],
+                "type": rec.get("type"),
                 "metadata": rec.get("metadata", {}),
                 "created_at": rec.get("created_at"),
                 "updated_at": rec.get("updated_at"),
@@ -383,4 +425,5 @@ def search():
 
 if __name__ == "__main__":
     ensure_dir(NS_DIR)
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5001")), debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=False, use_reloader=False)
+

@@ -1,5 +1,8 @@
-echo "flask
+flask
 faiss-cpu
 numpy
-requests
-filelock" > requirements.txt
+filelock
+pillow
+torch
+torchvision
+transformers
