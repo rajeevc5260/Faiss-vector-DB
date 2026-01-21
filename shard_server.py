@@ -60,6 +60,9 @@ DEVICE = os.environ.get("CLIP_DEVICE", "cpu")
 
 app = Flask(__name__)
 
+# In-memory FAISS FlatIP index for staging vectors (per namespace).
+STAGING_FLAT_INDEXES: Dict[str, faiss.Index] = {}
+
 # Load CLIP once per shard process
 clip_model = CLIPModel.from_pretrained(CLIP_MODEL_NAME)
 clip_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME)
@@ -459,13 +462,81 @@ def meta_get_doc(namespace: str, doc_id: str) -> Optional[Dict[str, Any]]:
         "updated_at": row[7],
     }
 
+def meta_get_faiss_ids(namespace: str, doc_ids: List[str]) -> Dict[str, int]:
+    if not doc_ids:
+        return {}
+    out: Dict[str, int] = {}
+    con = sqlite_connect(shard_meta_db(namespace))
+    batch = 900  # keep under sqlite var limit
+    for i in range(0, len(doc_ids), batch):
+        chunk = doc_ids[i:i+batch]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = con.execute(
+            f"SELECT id, faiss_id FROM docs WHERE id IN ({placeholders})",
+            chunk
+        ).fetchall()
+        for doc_id, faiss_id in rows:
+            if faiss_id is not None:
+                out[doc_id] = int(faiss_id)
+    con.close()
+    return out
+
 def meta_delete_doc(namespace: str, doc_id: str) -> None:
     con = sqlite_connect(shard_meta_db(namespace))
     con.execute("DELETE FROM docs WHERE id=?", (doc_id,))
     con.commit()
     con.close()
 
-def staging_put(namespace: str, doc_id: str, vec_1xd: np.ndarray) -> None:
+def build_staging_flat_index(namespace: str, dim: int) -> faiss.Index:
+    index = faiss.IndexIDMap2(faiss.IndexFlatIP(dim))
+    staged = staging_all_vectors(namespace)
+    if not staged:
+        return index
+
+    doc_ids = [doc_id for doc_id, _ in staged]
+    faiss_ids = meta_get_faiss_ids(namespace, doc_ids)
+
+    vecs = []
+    ids = []
+    for doc_id, vec in staged:
+        fid = faiss_ids.get(doc_id)
+        if fid is None:
+            continue
+        vecs.append(vec.reshape(1, -1))
+        ids.append(fid)
+
+    if ids:
+        X = np.vstack(vecs).astype("float32")
+        I = np.array(ids, dtype="int64")
+        index.add_with_ids(X, I)
+    return index
+
+def get_or_build_staging_index(namespace: str, dim: int) -> faiss.Index:
+    index = STAGING_FLAT_INDEXES.get(namespace)
+    if index is None:
+        index = build_staging_flat_index(namespace, dim)
+        STAGING_FLAT_INDEXES[namespace] = index
+    return index
+
+def staging_index_add(namespace: str, faiss_id: int, vec_1xd: np.ndarray) -> None:
+    index = STAGING_FLAT_INDEXES.get(namespace)
+    if index is None:
+        return
+    index.add_with_ids(vec_1xd.reshape(1, -1).astype("float32"), np.array([int(faiss_id)], dtype="int64"))
+
+def staging_index_remove(namespace: str, faiss_id: int) -> None:
+    index = STAGING_FLAT_INDEXES.get(namespace)
+    if index is None:
+        return
+    sel = faiss.IDSelectorBatch(np.array([int(faiss_id)], dtype="int64"))
+    index.remove_ids(sel)
+
+def reset_staging_index(namespace: str, dim: int) -> None:
+    if namespace not in STAGING_FLAT_INDEXES:
+        return
+    STAGING_FLAT_INDEXES[namespace] = faiss.IndexIDMap2(faiss.IndexFlatIP(dim))
+
+def staging_put(namespace: str, doc_id: str, vec_1xd: np.ndarray, faiss_id: Optional[int] = None) -> None:
     vec = vec_1xd.reshape(-1).astype("float32")
     con = sqlite_connect(shard_staging_db(namespace))
     con.execute(
@@ -475,11 +546,24 @@ def staging_put(namespace: str, doc_id: str, vec_1xd: np.ndarray) -> None:
     con.commit()
     con.close()
 
-def staging_delete(namespace: str, doc_id: str) -> None:
+    if faiss_id is None:
+        rec = meta_get_doc(namespace, doc_id)
+        faiss_id = rec["faiss_id"] if rec else None
+    if faiss_id is not None:
+        staging_index_add(namespace, faiss_id, vec_1xd)
+
+def staging_delete(namespace: str, doc_id: str, faiss_id: Optional[int] = None, remove_from_mem: bool = True) -> None:
     con = sqlite_connect(shard_staging_db(namespace))
     con.execute("DELETE FROM staging_vectors WHERE id=?", (doc_id,))
     con.commit()
     con.close()
+
+    if remove_from_mem:
+        if faiss_id is None:
+            rec = meta_get_doc(namespace, doc_id)
+            faiss_id = rec["faiss_id"] if rec else None
+        if faiss_id is not None:
+            staging_index_remove(namespace, faiss_id)
 
 def staging_all_vectors(namespace: str) -> List[Tuple[str, np.ndarray]]:
     con = sqlite_connect(shard_staging_db(namespace))
@@ -543,8 +627,9 @@ def bootstrap_ingest_staging_into_index(namespace: str, index: faiss.Index, stat
                     text=rec.get("text", ""),
                     metadata=rec.get("metadata", {}),
                 )
-            staging_delete(namespace, doc_id)
+            staging_delete(namespace, doc_id, faiss_id=faiss_id, remove_from_mem=False)
 
+    reset_staging_index(namespace, int(state.get("dim", DEFAULT_DIM)))
     save_shard_state(namespace, state)
 
 
@@ -602,30 +687,47 @@ def search_index(namespace: str, index: faiss.Index, q_1xd: np.ndarray, top_k: i
     return out[:top_k]
 
 def search_staging(namespace: str, q_1xd: np.ndarray, top_k: int) -> List[Dict[str, Any]]:
-    # brute-force over staging vectors (small by design)
-    staged = staging_all_vectors(namespace)
-    if not staged:
+    index = get_or_build_staging_index(namespace, int(q_1xd.shape[-1]))
+    if index.ntotal == 0:
         return []
 
-    X = np.stack([v for _, v in staged], axis=0).astype("float32")  # (N, dim)
-    q = q_1xd.reshape(-1).astype("float32")  # (dim,)
-    scores = X @ q  # (N,)
+    k = min(top_k, index.ntotal)
+    D, I = index.search(q_1xd.astype("float32"), k)
+    ids = [int(x) for x in I[0].tolist() if int(x) != -1]
+    if not ids:
+        return []
 
-    # top-k indices
-    k = min(top_k, scores.shape[0])
-    idx = np.argpartition(scores, -k)[-k:]
-    idx = idx[np.argsort(scores[idx])[::-1]]
+    con = sqlite_connect(shard_meta_db(namespace))
+    placeholders = ",".join(["?"] * len(ids))
+    rows = con.execute(
+        f"SELECT id, faiss_id, type, text, metadata_json, created_at, updated_at FROM docs WHERE faiss_id IN ({placeholders})",
+        ids
+    ).fetchall()
+    con.close()
+
+    by_faiss = {}
+    for r in rows:
+        by_faiss[int(r[1])] = {
+            "id": r[0],
+            "type": r[2],
+            "text": r[3] or "",
+            "metadata": json.loads(r[4] or "{}"),
+            "created_at": r[5],
+            "updated_at": r[6],
+        }
 
     out = []
-    for i in idx.tolist():
-        doc_id = staged[i][0]
-        rec = meta_get_doc(namespace, doc_id)
+    for score, fid in zip(D[0].tolist(), I[0].tolist()):
+        fid = int(fid)
+        if fid == -1:
+            continue
+        rec = by_faiss.get(fid)
         if not rec:
             continue
         boost = 0.05 if rec.get("type") == "image" else 0.0
         out.append({
             "id": rec["id"],
-            "score": float(scores[i] + boost),
+            "score": float(score + boost),
             "type": rec["type"],
             "text": rec["text"],
             "metadata": rec["metadata"],
@@ -718,7 +820,7 @@ def insert():
                 if existing["in_index"] == 1 and index is not None and existing["faiss_id"] is not None:
                     remove_from_index(index, existing["faiss_id"])
                 else:
-                    staging_delete(namespace, doc_id)
+                    staging_delete(namespace, doc_id, faiss_id=existing["faiss_id"])
 
             # If index trained and ready -> add directly
             if index is not None:
@@ -732,7 +834,7 @@ def insert():
             # else -> staging
             # allocate faiss_id early so it stays stable after training
             faiss_id = existing["faiss_id"] if (existing and existing["faiss_id"] is not None) else allocate_faiss_id(state)
-            staging_put(namespace, doc_id, vec)
+            staging_put(namespace, doc_id, vec, faiss_id=faiss_id)
             meta_upsert_doc(namespace, doc_id, faiss_id, 0, doc_type, doc_text, doc_meta)
             save_shard_state(namespace, state)
             return jsonify({"namespace": namespace, "result": {"id": doc_id, "faiss_id": int(faiss_id), "stored": "staging"}})
@@ -771,7 +873,7 @@ def insert():
             if existing["in_index"] == 1 and index is not None and existing["faiss_id"] is not None:
                 remove_from_index(index, existing["faiss_id"])
             else:
-                staging_delete(namespace, doc_id)
+                staging_delete(namespace, doc_id, faiss_id=existing["faiss_id"])
 
         if index is not None:
             faiss_id = existing["faiss_id"] if (existing and existing["faiss_id"] is not None) else allocate_faiss_id(state)
@@ -782,7 +884,7 @@ def insert():
             return jsonify({"namespace": namespace, "result": {"id": doc_id, "faiss_id": int(faiss_id), "stored": "ivf"}})
 
         faiss_id = existing["faiss_id"] if (existing and existing["faiss_id"] is not None) else allocate_faiss_id(state)
-        staging_put(namespace, doc_id, vec)
+        staging_put(namespace, doc_id, vec, faiss_id=faiss_id)
         meta_upsert_doc(namespace, doc_id, faiss_id, 0, doc_type, doc_text, doc_meta)
         save_shard_state(namespace, state)
         return jsonify({"namespace": namespace, "result": {"id": doc_id, "faiss_id": int(faiss_id), "stored": "staging"}})
