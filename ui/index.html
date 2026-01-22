@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vector DB Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="min-h-screen">
+    <div class="mx-auto max-w-6xl px-6 py-10">
+      <header class="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
+        <div class="fade-up">
+          <div class="badge inline-block">Vector DB Console</div>
+          <h1 class="mt-4 text-3xl font-semibold tracking-tight">Namespaces</h1>
+          <p class="mt-2 text-sm text-black/60">
+            Start here. Pick a namespace to manage Records, indexing, search, and retraining.
+          </p>
+        </div>
+        <div class="card fade-up fade-delay-1 w-full border px-4 py-4 md:w-[320px] hidden ">
+          <label class="text-xs uppercase tracking-wide text-black/60">API Base</label>
+          <input
+            data-base-url
+            class="mt-2 w-full border border-black/20 px-3 py-2 text-sm focus:outline-none"
+            placeholder="http://localhost:5001"
+          />
+          <button data-base-save class="btn-primary mt-3 w-full px-3 py-2 text-xs uppercase tracking-wide">
+            Save
+          </button>
+          <div data-cors-note class="mt-2 hidden text-xs text-black/50">
+            If requests fail, serve this UI from the same origin or keep CORS enabled.
+          </div>
+        </div>
+      </header>
+
+      <section class="mt-10 grid gap-6 md:grid-cols-[2fr_1fr]">
+        <div class="card fade-up fade-delay-2 border px-6 py-6">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 class="text-lg font-semibold">All namespaces</h2>
+              <p class="text-sm text-black/50">Click any namespace to manage its vectors.</p>
+            </div>
+            <div class="flex gap-2">
+              <button data-ns-refresh class="btn-outline px-4 py-2 text-xs uppercase tracking-wide">Refresh</button>
+              <button data-ns-create class="btn-primary px-4 py-2 text-xs uppercase tracking-wide">Create</button>
+            </div>
+          </div>
+
+          <div data-ns-empty class="mt-6 border border-dashed border-black/30 p-6 text-sm text-black/50">
+            No namespaces yet. Create your first namespace to get started.
+          </div>
+
+          <div data-ns-list class="mt-4 divide-y divide-black/10"></div>
+        </div>
+
+        <div class="card fade-up fade-delay-3 border px-6 py-6">
+          <h3 class="text-lg font-semibold">Suggested flow</h3>
+          <ol class="mt-4 space-y-3 text-sm text-black/70">
+            <li>1. Create a namespace for a dataset.</li>
+            <li>2. Insert text or image Records.</li>
+            <li>3. Monitor training progress.</li>
+            <li>4. Search and evaluate results.</li>
+          </ol>
+          <div class="mt-6 border border-black/10 p-4 text-xs text-black/60">
+            Tip: training triggers automatically once your pool reaches TRAIN_MIN.
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div data-toast class="toast fixed bottom-6 right-6 hidden"></div>
+
+    <div id="modalCreateNs" class="modal-backdrop fixed inset-0 hidden items-center justify-center px-4 flex">
+      <div class="card w-full max-w-md border px-6 py-6">
+        <h3 class="text-lg font-semibold">Create namespace</h3>
+        <p class="mt-2 text-sm text-black/60">Give it a short, memorable name.</p>
+        <input
+          data-ns-input
+          class="mt-4 w-full border border-black/20 px-3 py-2 text-sm"
+          placeholder="e.g. ecommerce"
+        />
+        <div class="mt-6 flex justify-end gap-2">
+          <button data-modal-close="modalCreateNs" class="btn-outline px-4 py-2 text-xs uppercase tracking-wide">
+            Cancel
+          </button>
+          <button data-ns-submit class="btn-primary px-4 py-2 text-xs uppercase tracking-wide">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="assets/app.js"></script>
+  </body>
+</html>

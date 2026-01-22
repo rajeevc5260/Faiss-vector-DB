@@ -5,6 +5,7 @@ import base64
 import sqlite3
 import tempfile
 import hashlib
+import shutil
 from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
@@ -60,6 +61,26 @@ DEVICE = os.environ.get("CLIP_DEVICE", "cpu")
 
 app = Flask(__name__)
 
+# CORS headers for browser-based admin UI calls.
+def add_cors_headers(resp):
+    origin = request.headers.get("Origin")
+    resp.headers["Access-Control-Allow-Origin"] = origin or "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
+    resp.headers["Access-Control-Max-Age"] = "86400"
+    resp.headers["Vary"] = "Origin"
+    return resp
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        return add_cors_headers(app.make_default_options_response())
+    return None
+
+@app.after_request
+def attach_cors(resp):
+    return add_cors_headers(resp)
+
 # In-memory FAISS FlatIP index for staging vectors (per namespace).
 STAGING_FLAT_INDEXES: Dict[str, faiss.Index] = {}
 
@@ -105,6 +126,11 @@ def read_json(path: str, default: Any) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+def parse_bool(val: Optional[str], default: bool = False) -> bool:
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
 
 
 # PATHS (namespace + shard)
@@ -147,6 +173,16 @@ def shard_meta_db(namespace: str) -> str:
 def shard_staging_db(namespace: str) -> str:
     return os.path.join(shard_dir(namespace), "staging.db")
 
+def list_namespaces() -> List[str]:
+    ensure_dir(NS_DIR)
+    out = []
+    for name in os.listdir(NS_DIR):
+        path = os.path.join(NS_DIR, name)
+        if os.path.isdir(path):
+            out.append(name)
+    out.sort()
+    return out
+
 
 
 # SQLITE (meta + staging + training pool)
@@ -180,19 +216,41 @@ def init_shard_dbs(namespace: str) -> None:
 
     # staging.db
     con = sqlite_connect(shard_staging_db(namespace))
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS staging_vectors (
-            id TEXT PRIMARY KEY,
-            vector BLOB NOT NULL,        -- float32[dim] bytes
-            created_at INTEGER
-        );
-    """)
+    ensure_staging_schema(con)
     con.commit()
     con.close()
 
     # training pool db (shared per namespace)
     ensure_dir(ns_training_dir(namespace))
     con = sqlite_connect(ns_training_pool_db(namespace))
+    ensure_training_pool_schema(con)
+    con.commit()
+    con.close()
+
+def count_meta_docs(namespace: str) -> Tuple[int, int]:
+    con = sqlite_connect(shard_meta_db(namespace))
+    total = int(con.execute("SELECT COUNT(*) FROM docs;").fetchone()[0])
+    in_index = int(con.execute("SELECT COUNT(*) FROM docs WHERE in_index=1;").fetchone()[0])
+    con.close()
+    return total, in_index
+
+def count_staging_vectors(namespace: str) -> int:
+    con = sqlite_connect(shard_staging_db(namespace))
+    ensure_staging_schema(con)
+    n = int(con.execute("SELECT COUNT(*) FROM staging_vectors;").fetchone()[0])
+    con.close()
+    return n
+
+def ensure_staging_schema(con: sqlite3.Connection) -> None:
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS staging_vectors (
+            id TEXT PRIMARY KEY,
+            vector BLOB NOT NULL,
+            created_at INTEGER
+        );
+    """)
+
+def ensure_training_pool_schema(con: sqlite3.Connection) -> None:
     con.execute("""
         CREATE TABLE IF NOT EXISTS training_pool (
             uid TEXT PRIMARY KEY,
@@ -200,8 +258,6 @@ def init_shard_dbs(namespace: str) -> None:
             created_at INTEGER
         );
     """)
-    con.commit()
-    con.close()
 
 
 
@@ -330,6 +386,7 @@ def ensure_shard_index_ready(namespace: str) -> Tuple[Optional[faiss.Index], Dic
 
 def pool_count(namespace: str) -> int:
     con = sqlite_connect(ns_training_pool_db(namespace))
+    ensure_training_pool_schema(con)
     cur = con.execute("SELECT COUNT(*) FROM training_pool;")
     n = int(cur.fetchone()[0])
     con.close()
@@ -339,6 +396,7 @@ def pool_add_vector(namespace: str, uid: str, vec_1xd: np.ndarray) -> None:
     # store raw float32 bytes (dim*4)
     vec = vec_1xd.reshape(-1).astype("float32")
     con = sqlite_connect(ns_training_pool_db(namespace))
+    ensure_training_pool_schema(con)
     con.execute(
         "INSERT OR REPLACE INTO training_pool(uid, vector, created_at) VALUES(?,?,?)",
         (uid, vec.tobytes(), now_ms())
@@ -346,8 +404,16 @@ def pool_add_vector(namespace: str, uid: str, vec_1xd: np.ndarray) -> None:
     con.commit()
     con.close()
 
+def pool_delete_vector(namespace: str, uid: str) -> None:
+    con = sqlite_connect(ns_training_pool_db(namespace))
+    ensure_training_pool_schema(con)
+    con.execute("DELETE FROM training_pool WHERE uid=?", (uid,))
+    con.commit()
+    con.close()
+
 def pool_sample_vectors(namespace: str, max_n: int) -> np.ndarray:
-    con = sqlite3.connect(ns_training_pool_db(namespace))
+    con = sqlite_connect(ns_training_pool_db(namespace))
+    ensure_training_pool_schema(con)
     cur = con.execute("SELECT vector FROM training_pool ORDER BY created_at DESC LIMIT ?", (max_n,))
     rows = cur.fetchall()
     con.close()
@@ -539,6 +605,7 @@ def reset_staging_index(namespace: str, dim: int) -> None:
 def staging_put(namespace: str, doc_id: str, vec_1xd: np.ndarray, faiss_id: Optional[int] = None) -> None:
     vec = vec_1xd.reshape(-1).astype("float32")
     con = sqlite_connect(shard_staging_db(namespace))
+    ensure_staging_schema(con)
     con.execute(
         "INSERT OR REPLACE INTO staging_vectors(id, vector, created_at) VALUES(?,?,?)",
         (doc_id, vec.tobytes(), now_ms())
@@ -554,6 +621,7 @@ def staging_put(namespace: str, doc_id: str, vec_1xd: np.ndarray, faiss_id: Opti
 
 def staging_delete(namespace: str, doc_id: str, faiss_id: Optional[int] = None, remove_from_mem: bool = True) -> None:
     con = sqlite_connect(shard_staging_db(namespace))
+    ensure_staging_schema(con)
     con.execute("DELETE FROM staging_vectors WHERE id=?", (doc_id,))
     con.commit()
     con.close()
@@ -567,6 +635,7 @@ def staging_delete(namespace: str, doc_id: str, faiss_id: Optional[int] = None, 
 
 def staging_all_vectors(namespace: str) -> List[Tuple[str, np.ndarray]]:
     con = sqlite_connect(shard_staging_db(namespace))
+    ensure_staging_schema(con)
     rows = con.execute("SELECT id, vector FROM staging_vectors").fetchall()
     con.close()
     out = []
@@ -965,6 +1034,198 @@ def retrain():
         "namespace": namespace,
         "status": "retrained",
         "used_vectors": sample_last or "auto"
+    })
+
+@app.post("/admin/namespace/create")
+def create_namespace():
+    body = request.get_json(force=True) or {}
+    namespace = body.get("namespace", "default")
+    if not namespace or not isinstance(namespace, str):
+        return jsonify({"error": "namespace is required (string)"}), 400
+
+    init_shard_dbs(namespace)
+    ensure_dir(ns_training_dir(namespace))
+    state = load_or_create_shard_state(namespace)
+    save_shard_state(namespace, state)
+
+    return jsonify({
+        "namespace": namespace,
+        "status": "created",
+        "shard_id": SHARD_ID,
+    })
+
+@app.get("/admin/namespaces")
+def get_namespaces():
+    return jsonify({
+        "shard_id": SHARD_ID,
+        "namespaces": list_namespaces(),
+    })
+
+@app.get("/admin/namespace")
+def get_namespace():
+    namespace = request.args.get("namespace", "default")
+    if not namespace:
+        return jsonify({"error": "namespace is required"}), 400
+
+    init_shard_dbs(namespace)
+    total, in_index = count_meta_docs(namespace)
+    staged = count_staging_vectors(namespace)
+    trained_template = is_trained_template_exists(namespace)
+    index_exists = os.path.exists(shard_index_path(namespace))
+    include_training_stats = parse_bool(request.args.get("include_training_stats"))
+    stats = read_json(ns_training_stats(namespace), default=None) if include_training_stats else None
+
+    return jsonify({
+        "namespace": namespace,
+        "shard_id": SHARD_ID,
+        "counts": {
+            "docs_total": total,
+            "docs_in_index": in_index,
+            "staging_vectors": staged,
+            "training_pool": pool_count(namespace),
+        },
+        "index": {
+            "trained_template": trained_template,
+            "index_exists": index_exists,
+        },
+        "training_stats": stats,
+    })
+
+@app.get("/admin/namespace/docs")
+def list_namespace_docs():
+    namespace = request.args.get("namespace", "default")
+    if not namespace:
+        return jsonify({"error": "namespace is required"}), 400
+
+    limit = int(request.args.get("limit", "50"))
+    limit = max(1, min(limit, 500))
+    after_id = request.args.get("after_id")
+    include_text = parse_bool(request.args.get("include_text"))
+    include_metadata = parse_bool(request.args.get("include_metadata"))
+    include_total = parse_bool(request.args.get("include_total"))
+
+    init_shard_dbs(namespace)
+    con = sqlite_connect(shard_meta_db(namespace))
+    if after_id:
+        rows = con.execute(
+            """
+            SELECT id, faiss_id, in_index, type, text, metadata_json, created_at, updated_at
+            FROM docs
+            WHERE id > ?
+            ORDER BY id
+            LIMIT ?
+            """,
+            (after_id, limit)
+        ).fetchall()
+    else:
+        rows = con.execute(
+            """
+            SELECT id, faiss_id, in_index, type, text, metadata_json, created_at, updated_at
+            FROM docs
+            ORDER BY id
+            LIMIT ?
+            """,
+            (limit,)
+        ).fetchall()
+
+    total = None
+    if include_total:
+        total = int(con.execute("SELECT COUNT(*) FROM docs;").fetchone()[0])
+    con.close()
+
+    docs = []
+    last_id = None
+    for r in rows:
+        doc = {
+            "id": r[0],
+            "faiss_id": int(r[1]) if r[1] is not None else None,
+            "in_index": int(r[2]),
+            "type": r[3],
+            "created_at": r[6],
+            "updated_at": r[7],
+        }
+        if include_text:
+            doc["text"] = r[4] or ""
+        if include_metadata:
+            doc["metadata"] = json.loads(r[5] or "{}")
+        docs.append(doc)
+        last_id = r[0]
+
+    return jsonify({
+        "namespace": namespace,
+        "shard_id": SHARD_ID,
+        "docs": docs,
+        "next_after_id": last_id if len(docs) == limit else None,
+        "total": total,
+    })
+
+@app.delete("/delete")
+def delete_doc():
+    body = request.get_json(force=True) or {}
+    namespace = body.get("namespace", "default")
+    doc_id = body.get("id")
+    if not doc_id or not isinstance(doc_id, str):
+        return jsonify({"error": "id is required (string)"}), 400
+
+    init_shard_dbs(namespace)
+    lock = FileLock(shard_lock_path(namespace))
+    with lock:
+        rec = meta_get_doc(namespace, doc_id)
+        if not rec:
+            return jsonify({"namespace": namespace, "id": doc_id, "status": "not_found"}), 404
+
+        index, state = ensure_shard_index_ready(namespace)
+        if rec["in_index"] == 1:
+            if index is None or rec["faiss_id"] is None:
+                return jsonify({"error": "index not ready for delete"}), 500
+            remove_from_index(index, rec["faiss_id"])
+            save_faiss_index(index, shard_index_path(namespace))
+        else:
+            staging_delete(namespace, doc_id, faiss_id=rec.get("faiss_id"))
+
+        meta_delete_doc(namespace, doc_id)
+        pool_delete_vector(namespace, f"{SHARD_ID}:{doc_id}")
+
+        return jsonify({
+            "namespace": namespace,
+            "id": doc_id,
+            "status": "deleted",
+            "in_index": rec["in_index"],
+        })
+
+@app.delete("/admin/namespace")
+def delete_namespace():
+    body = request.get_json(force=True) or {}
+    namespace = body.get("namespace", "")
+    if not namespace or not isinstance(namespace, str):
+        return jsonify({"error": "namespace is required (string)"}), 400
+
+    base = os.path.abspath(ns_base(namespace))
+    ns_root = os.path.abspath(NS_DIR)
+    if not base.startswith(ns_root + os.sep):
+        return jsonify({"error": "invalid namespace"}), 400
+
+    if namespace in STAGING_FLAT_INDEXES:
+        del STAGING_FLAT_INDEXES[namespace]
+
+    if not os.path.exists(base):
+        return jsonify({
+            "namespace": namespace,
+            "status": "not_found",
+            "deleted": False,
+            "shard_id": SHARD_ID,
+        })
+
+    try:
+        shutil.rmtree(base)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "namespace": namespace,
+        "status": "deleted",
+        "deleted": True,
+        "shard_id": SHARD_ID,
     })
 
 

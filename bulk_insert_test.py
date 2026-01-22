@@ -3,8 +3,8 @@ import textwrap
 import uuid
 
 API_URL = "http://localhost:5001/insert"  # router
-NAMESPACE = "data"
-CHUNK_SIZE = 100  # characters per chunk
+NAMESPACE = "Data5"
+CHUNK_SIZE = 150  # characters per chunk
 INPUT_FILE = "input.txt"
 
 # Read text from file

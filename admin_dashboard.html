@@ -1,0 +1,983 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vector DB Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              display: ["Space Grotesk", "ui-sans-serif", "system-ui"],
+              body: ["IBM Plex Sans", "ui-sans-serif", "system-ui"],
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      :root {
+        --bg: #f7f4ee;
+        --panel: #ffffff;
+        --panel-muted: #f1ece2;
+        --ink: #101319;
+        --muted: #5a6774;
+        --accent: #2b9a8b;
+        --accent-2: #f4a261;
+        --ring: rgba(43, 154, 139, 0.3);
+      }
+
+      body {
+        background: radial-gradient(1200px 800px at 10% -10%, #fff6db 0%, transparent 60%),
+          radial-gradient(1000px 700px at 95% 0%, #e3f5f2 0%, transparent 55%),
+          var(--bg);
+        color: var(--ink);
+        font-family: "IBM Plex Sans", ui-sans-serif, system-ui;
+      }
+
+      .grid-bg {
+        background-image: linear-gradient(to right, rgba(16, 19, 25, 0.04) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(16, 19, 25, 0.04) 1px, transparent 1px);
+        background-size: 36px 36px;
+      }
+
+      .glow {
+        box-shadow: 0 18px 50px rgba(16, 19, 25, 0.12), 0 0 0 1px rgba(16, 19, 25, 0.04);
+      }
+
+      .fade-up {
+        animation: fadeUp 0.7s ease both;
+      }
+
+      @keyframes fadeUp {
+        from {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .fade-up {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body class="min-h-screen grid-bg">
+    <div class="relative overflow-hidden">
+      <div class="absolute -top-32 right-10 h-64 w-64 rounded-full bg-emerald-200/60 blur-3xl"></div>
+      <div class="absolute top-20 -left-20 h-72 w-72 rounded-full bg-orange-200/60 blur-3xl"></div>
+      <div class="absolute bottom-0 right-0 h-80 w-80 rounded-full bg-emerald-100/60 blur-3xl"></div>
+    </div>
+
+    <header class="relative z-10 px-6 py-10">
+      <div class="mx-auto flex max-w-6xl flex-col gap-6 md:flex-row md:items-end md:justify-between">
+        <div>
+          <div class="inline-flex items-center gap-2 rounded-full bg-white/70 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+            Vector DB Ops
+          </div>
+          <h1 class="mt-4 font-display text-3xl font-semibold tracking-tight md:text-4xl">
+            Pinecone inspired admin dashboard
+          </h1>
+          <p class="mt-2 max-w-xl text-sm text-slate-600">
+            Manage namespaces, inspect indexes, insert and search vectors, and keep an eye on training.
+          </p>
+        </div>
+        <div class="flex items-center gap-3 text-sm text-slate-600">
+          <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
+          <span id="connectionStatus">Idle</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="relative z-10 mx-auto max-w-6xl px-6 pb-20">
+      <section class="grid gap-6 md:grid-cols-[1.1fr_0.9fr]">
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.05s">
+          <h2 class="font-display text-lg font-semibold">Connection</h2>
+          <p class="mt-1 text-sm text-slate-600">Point the dashboard to your router service.</p>
+          <div class="mt-4 flex flex-col gap-3 md:flex-row md:items-center">
+            <div class="flex-1">
+              <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Base URL</label>
+              <input
+                id="baseUrl"
+                class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                placeholder="http://localhost:5001"
+              />
+            </div>
+            <button
+              id="saveBaseUrl"
+              class="mt-5 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500"
+            >
+              Save
+            </button>
+          </div>
+          <div id="corsWarning" class="mt-4 hidden rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            CORS warning: this page is not on the same origin as your API. If requests fail, host this HTML from the
+            same origin or add CORS headers in the router.
+          </div>
+        </div>
+
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.1s">
+          <h2 class="font-display text-lg font-semibold">Quick Actions</h2>
+          <p class="mt-1 text-sm text-slate-600">Fast checks for namespaces and cluster health.</p>
+          <div class="mt-4 flex flex-wrap gap-3">
+            <button class="action-btn" data-action="listNamespaces">List Namespaces</button>
+            <button class="action-btn" data-action="getNamespaceStats">Get Namespace Stats</button>
+            <button class="action-btn" data-action="retrain">Retrain</button>
+            <button class="action-btn" data-action="health">Health</button>
+          </div>
+          <div class="mt-4 rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+            <div id="quickSummary" class="mt-1">—</div>
+            <div id="quickNamespaces" class="mt-3 flex flex-wrap gap-2"></div>
+            <details class="mt-2 text-xs text-slate-500">
+              <summary class="cursor-pointer">Raw response</summary>
+              <pre id="quickOutput" class="mt-2 whitespace-pre-wrap"></pre>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="mt-8 grid gap-6 lg:grid-cols-3">
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.15s">
+          <h3 class="font-display text-base font-semibold">Namespaces</h3>
+          <div class="mt-4 space-y-3">
+            <div>
+              <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Namespace</label>
+              <input id="nsName" class="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="default" />
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button class="action-btn" data-action="createNamespace">Create</button>
+              <button class="action-btn-outline" data-action="deleteNamespace">Delete</button>
+            </div>
+            <div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+              <div id="nsSummary" class="mt-1">—</div>
+              <details class="mt-2 text-xs text-slate-500">
+                <summary class="cursor-pointer">Raw response</summary>
+                <pre id="nsOutput" class="mt-2 whitespace-pre-wrap"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.2s">
+          <h3 class="font-display text-base font-semibold">Insert Text</h3>
+          <div class="mt-4 space-y-3">
+            <div class="grid grid-cols-2 gap-2">
+              <input id="insertTextNs" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="namespace" />
+              <div class="flex gap-2">
+                <input id="insertTextId" class="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="id" />
+                <button class="action-btn-outline" data-action="genId">New</button>
+              </div>
+            </div>
+            <textarea id="insertTextValue" class="h-24 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="Text to embed"></textarea>
+            <div class="grid grid-cols-2 gap-2">
+              <input id="insertTextTags" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="Tags (comma separated)" />
+              <input id="insertTextSource" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="Source (optional)" />
+            </div>
+            <details class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+              <summary class="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-slate-500">Advanced metadata (JSON)</summary>
+              <textarea id="insertTextMeta" class="mt-2 h-16 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs" placeholder='{"key":"value"}'></textarea>
+            </details>
+            <button class="action-btn w-full" data-action="insertText">Insert</button>
+            <div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+              <div id="insertTextSummary" class="mt-1">—</div>
+              <details class="mt-2 text-xs text-slate-500">
+                <summary class="cursor-pointer">Raw response</summary>
+                <pre id="insertTextOutput" class="mt-2 whitespace-pre-wrap"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.25s">
+          <h3 class="font-display text-base font-semibold">Insert Image</h3>
+          <div class="mt-4 space-y-3">
+            <div class="grid grid-cols-2 gap-2">
+              <input id="insertImageNs" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="namespace" />
+              <input id="insertImageId" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="id" />
+            </div>
+            <input id="insertImageFile" type="file" class="w-full text-sm" />
+            <input id="insertImageText" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="Optional text" />
+            <div class="grid grid-cols-2 gap-2">
+              <input id="insertImageTags" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="Tags (comma separated)" />
+              <input id="insertImageSource" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="Source (optional)" />
+            </div>
+            <details class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+              <summary class="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-slate-500">Advanced metadata (JSON)</summary>
+              <textarea id="insertImageMeta" class="mt-2 h-16 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs" placeholder='{"key":"value"}'></textarea>
+            </details>
+            <button class="action-btn w-full" data-action="insertImage">Insert Image</button>
+            <div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+              <div id="insertImageSummary" class="mt-1">—</div>
+              <details class="mt-2 text-xs text-slate-500">
+                <summary class="cursor-pointer">Raw response</summary>
+                <pre id="insertImageOutput" class="mt-2 whitespace-pre-wrap"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mt-8 grid gap-6 lg:grid-cols-2">
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.3s">
+          <h3 class="font-display text-base font-semibold">Search (Text)</h3>
+          <div class="mt-4 space-y-3">
+            <div class="grid grid-cols-3 gap-2">
+              <input id="searchTextNs" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="namespace" />
+              <input id="searchTextTopK" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="top_k" />
+              <input id="searchTextNprobe" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="nprobe (optional)" />
+            </div>
+            <textarea id="searchTextQuery" class="h-20 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="Search query"></textarea>
+            <button class="action-btn w-full" data-action="searchText">Search</button>
+            <div id="searchTextResults" class="space-y-2"></div>
+            <div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+              <div id="searchTextSummary" class="mt-1">—</div>
+              <details class="mt-2 text-xs text-slate-500">
+                <summary class="cursor-pointer">Raw response</summary>
+                <pre id="searchTextOutput" class="mt-2 whitespace-pre-wrap"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.35s">
+          <h3 class="font-display text-base font-semibold">Search (Image)</h3>
+          <div class="mt-4 space-y-3">
+            <div class="grid grid-cols-3 gap-2">
+              <input id="searchImageNs" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="namespace" />
+              <input id="searchImageTopK" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="top_k" />
+              <input id="searchImageNprobe" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="nprobe (optional)" />
+            </div>
+            <input id="searchImageFile" type="file" class="w-full text-sm" />
+            <button class="action-btn w-full" data-action="searchImage">Search Image</button>
+            <div id="searchImageResults" class="space-y-2"></div>
+            <div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+              <div id="searchImageSummary" class="mt-1">—</div>
+              <details class="mt-2 text-xs text-slate-500">
+                <summary class="cursor-pointer">Raw response</summary>
+                <pre id="searchImageOutput" class="mt-2 whitespace-pre-wrap"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mt-8 grid gap-6 lg:grid-cols-3">
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.4s">
+          <h3 class="font-display text-base font-semibold">Delete Document</h3>
+          <div class="mt-4 space-y-3">
+            <div class="grid grid-cols-2 gap-2">
+              <input id="deleteNs" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="namespace" />
+              <input id="deleteId" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="id" />
+            </div>
+            <button class="action-btn-outline w-full" data-action="deleteDoc">Delete</button>
+            <div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+              <div id="deleteSummary" class="mt-1">—</div>
+              <details class="mt-2 text-xs text-slate-500">
+                <summary class="cursor-pointer">Raw response</summary>
+                <pre id="deleteOutput" class="mt-2 whitespace-pre-wrap"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.45s">
+          <h3 class="font-display text-base font-semibold">Namespace Stats</h3>
+          <div class="mt-4 space-y-3">
+            <input id="statsNs" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="namespace" />
+            <label class="flex items-center gap-2 text-xs text-slate-600">
+              <input id="statsIncludeTraining" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-emerald-600" />
+              Include training stats
+            </label>
+            <button class="action-btn w-full" data-action="getNamespaceStats">Get Stats</button>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+              <div class="rounded-lg bg-slate-50 p-2">
+                <div class="text-[10px] uppercase text-slate-400">Docs</div>
+                <div id="statsDocs" class="text-sm font-semibold">—</div>
+              </div>
+              <div class="rounded-lg bg-slate-50 p-2">
+                <div class="text-[10px] uppercase text-slate-400">In Index</div>
+                <div id="statsInIndex" class="text-sm font-semibold">—</div>
+              </div>
+              <div class="rounded-lg bg-slate-50 p-2">
+                <div class="text-[10px] uppercase text-slate-400">Staging</div>
+                <div id="statsStaging" class="text-sm font-semibold">—</div>
+              </div>
+              <div class="rounded-lg bg-slate-50 p-2">
+                <div class="text-[10px] uppercase text-slate-400">Training Pool</div>
+                <div id="statsPool" class="text-sm font-semibold">—</div>
+              </div>
+            </div>
+            <div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+              <div id="statsSummary" class="mt-1">—</div>
+              <details class="mt-2 text-xs text-slate-500">
+                <summary class="cursor-pointer">Raw response</summary>
+                <pre id="statsOutput" class="mt-2 whitespace-pre-wrap"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.5s">
+          <h3 class="font-display text-base font-semibold">Retrain</h3>
+          <div class="mt-4 space-y-3">
+            <div class="grid grid-cols-2 gap-2">
+              <input id="retrainNs" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="namespace" />
+              <input id="retrainLastN" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="last_n (optional)" />
+            </div>
+            <button class="action-btn w-full" data-action="retrain">Run Retrain</button>
+            <div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Result</div>
+              <div id="retrainSummary" class="mt-1">—</div>
+              <details class="mt-2 text-xs text-slate-500">
+                <summary class="cursor-pointer">Raw response</summary>
+                <pre id="retrainOutput" class="mt-2 whitespace-pre-wrap"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mt-8">
+        <div class="glow fade-up rounded-2xl bg-white/90 p-6 backdrop-blur" style="animation-delay: 0.55s">
+          <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h3 class="font-display text-base font-semibold">Records</h3>
+              <p class="text-sm text-slate-600">Keyset pagination with optional text and metadata.</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <input id="docsNs" class="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="namespace" />
+              <input id="docsShard" class="w-20 rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="shard" />
+              <input id="docsLimit" class="w-24 rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="limit" />
+              <label class="flex items-center gap-2 text-xs text-slate-600">
+                <input id="docsIncludeText" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-emerald-600" />
+                Text
+              </label>
+              <label class="flex items-center gap-2 text-xs text-slate-600">
+                <input id="docsIncludeMeta" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-emerald-600" />
+                Metadata
+              </label>
+            </div>
+          </div>
+          <div class="mt-4 flex flex-wrap gap-2">
+            <button class="action-btn" data-action="listDocs">Load Page</button>
+            <button class="action-btn-outline" data-action="prevDocs">Prev</button>
+            <button class="action-btn-outline" data-action="nextDocs">Next</button>
+            <span class="text-xs text-slate-500">Cursor: <span id="docsCursor">none</span></span>
+          </div>
+          <div class="mt-4 overflow-auto rounded-xl border border-slate-200 bg-white">
+            <table class="min-w-full text-left text-xs">
+              <thead class="bg-slate-50 text-slate-500">
+                <tr>
+                  <th class="px-3 py-2 font-semibold">ID</th>
+                  <th class="px-3 py-2 font-semibold">Type</th>
+                  <th class="px-3 py-2 font-semibold">In Index</th>
+                  <th class="px-3 py-2 font-semibold">Faiss ID</th>
+                  <th class="px-3 py-2 font-semibold">Updated</th>
+                </tr>
+              </thead>
+              <tbody id="docsTable" class="divide-y divide-slate-100"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const elements = {
+        baseUrl: document.getElementById("baseUrl"),
+        connectionStatus: document.getElementById("connectionStatus"),
+        corsWarning: document.getElementById("corsWarning"),
+        quickOutput: document.getElementById("quickOutput"),
+        quickSummary: document.getElementById("quickSummary"),
+        quickNamespaces: document.getElementById("quickNamespaces"),
+        nsName: document.getElementById("nsName"),
+        nsOutput: document.getElementById("nsOutput"),
+        nsSummary: document.getElementById("nsSummary"),
+        insertTextNs: document.getElementById("insertTextNs"),
+        insertTextId: document.getElementById("insertTextId"),
+        insertTextValue: document.getElementById("insertTextValue"),
+        insertTextMeta: document.getElementById("insertTextMeta"),
+        insertTextTags: document.getElementById("insertTextTags"),
+        insertTextSource: document.getElementById("insertTextSource"),
+        insertTextOutput: document.getElementById("insertTextOutput"),
+        insertTextSummary: document.getElementById("insertTextSummary"),
+        insertImageNs: document.getElementById("insertImageNs"),
+        insertImageId: document.getElementById("insertImageId"),
+        insertImageFile: document.getElementById("insertImageFile"),
+        insertImageText: document.getElementById("insertImageText"),
+        insertImageMeta: document.getElementById("insertImageMeta"),
+        insertImageTags: document.getElementById("insertImageTags"),
+        insertImageSource: document.getElementById("insertImageSource"),
+        insertImageOutput: document.getElementById("insertImageOutput"),
+        insertImageSummary: document.getElementById("insertImageSummary"),
+        searchTextNs: document.getElementById("searchTextNs"),
+        searchTextTopK: document.getElementById("searchTextTopK"),
+        searchTextNprobe: document.getElementById("searchTextNprobe"),
+        searchTextQuery: document.getElementById("searchTextQuery"),
+        searchTextOutput: document.getElementById("searchTextOutput"),
+        searchTextSummary: document.getElementById("searchTextSummary"),
+        searchTextResults: document.getElementById("searchTextResults"),
+        searchImageNs: document.getElementById("searchImageNs"),
+        searchImageTopK: document.getElementById("searchImageTopK"),
+        searchImageNprobe: document.getElementById("searchImageNprobe"),
+        searchImageFile: document.getElementById("searchImageFile"),
+        searchImageOutput: document.getElementById("searchImageOutput"),
+        searchImageSummary: document.getElementById("searchImageSummary"),
+        searchImageResults: document.getElementById("searchImageResults"),
+        deleteNs: document.getElementById("deleteNs"),
+        deleteId: document.getElementById("deleteId"),
+        deleteOutput: document.getElementById("deleteOutput"),
+        deleteSummary: document.getElementById("deleteSummary"),
+        statsNs: document.getElementById("statsNs"),
+        statsIncludeTraining: document.getElementById("statsIncludeTraining"),
+        statsOutput: document.getElementById("statsOutput"),
+        statsSummary: document.getElementById("statsSummary"),
+        statsDocs: document.getElementById("statsDocs"),
+        statsInIndex: document.getElementById("statsInIndex"),
+        statsStaging: document.getElementById("statsStaging"),
+        statsPool: document.getElementById("statsPool"),
+        retrainNs: document.getElementById("retrainNs"),
+        retrainLastN: document.getElementById("retrainLastN"),
+        retrainOutput: document.getElementById("retrainOutput"),
+        retrainSummary: document.getElementById("retrainSummary"),
+        docsNs: document.getElementById("docsNs"),
+        docsShard: document.getElementById("docsShard"),
+        docsLimit: document.getElementById("docsLimit"),
+        docsIncludeText: document.getElementById("docsIncludeText"),
+        docsIncludeMeta: document.getElementById("docsIncludeMeta"),
+        docsTable: document.getElementById("docsTable"),
+        docsCursor: document.getElementById("docsCursor"),
+      };
+
+      const state = {
+        docsAfterId: null,
+        docsStack: [],
+      };
+
+      const actionButtons = document.querySelectorAll(".action-btn, .action-btn-outline");
+      actionButtons.forEach((btn) => {
+        btn.classList.add(
+          "rounded-xl",
+          "px-3",
+          "py-2",
+          "text-xs",
+          "font-semibold",
+          "uppercase",
+          "tracking-wide",
+          "transition"
+        );
+        if (btn.classList.contains("action-btn")) {
+          btn.classList.add("bg-emerald-600", "text-white", "hover:bg-emerald-500");
+        } else {
+          btn.classList.add("border", "border-emerald-200", "text-emerald-700", "hover:border-emerald-300");
+        }
+      });
+
+      function setStatus(text, ok = true) {
+        elements.connectionStatus.textContent = text;
+        elements.connectionStatus.className = ok ? "text-emerald-600" : "text-amber-600";
+      }
+
+      function readJson(text) {
+        if (!text) {
+          return {};
+        }
+        try {
+          return JSON.parse(text);
+        } catch (err) {
+          return { error: "Invalid JSON", detail: String(err) };
+        }
+      }
+
+      function buildMetadata(tagsText, sourceText, jsonText) {
+        const metadata = {};
+        const tags = (tagsText || "")
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean);
+        if (tags.length) {
+          metadata.tags = tags;
+        }
+        if (sourceText) {
+          metadata.source = sourceText.trim();
+        }
+        if (jsonText) {
+          const extra = readJson(jsonText);
+          if (extra.error) {
+            throw new Error(extra.detail || extra.error);
+          }
+          Object.assign(metadata, extra);
+        }
+        return metadata;
+      }
+
+      function formatJson(obj) {
+        return JSON.stringify(obj, null, 2);
+      }
+
+      function getBaseUrl() {
+        return (elements.baseUrl.value || "").trim().replace(/\/$/, "");
+      }
+
+      function updateCorsWarning() {
+        try {
+          const base = getBaseUrl();
+          if (!base) {
+            elements.corsWarning.classList.add("hidden");
+            return;
+          }
+          const baseOrigin = new URL(base).origin;
+          if (baseOrigin !== window.location.origin) {
+            elements.corsWarning.classList.remove("hidden");
+          } else {
+            elements.corsWarning.classList.add("hidden");
+          }
+        } catch {
+          elements.corsWarning.classList.remove("hidden");
+        }
+      }
+
+      async function apiFetch(path, options = {}) {
+        const base = getBaseUrl();
+        if (!base) {
+          throw new Error("Set Base URL first");
+        }
+        const url = `${base}${path}`;
+        const response = await fetch(url, {
+          mode: "cors",
+          ...options,
+        });
+        const text = await response.text();
+        let data = null;
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch {
+            data = { raw: text };
+          }
+        }
+        if (!response.ok) {
+          throw new Error(data ? formatJson(data) : response.statusText);
+        }
+        return data;
+      }
+
+      function renderOutput(el, data) {
+        if (!el) return;
+        el.textContent = typeof data === "string" ? data : formatJson(data);
+      }
+
+      function renderSummary(el, text) {
+        if (!el) return;
+        el.textContent = text || "Done";
+      }
+
+      function renderNamespaceList(namespaces) {
+        if (!namespaces || namespaces.length === 0) {
+          return "No namespaces yet";
+        }
+        return `Namespaces: ${namespaces.join(", ")}`;
+      }
+
+      function renderSearchResults(data, container, summaryEl) {
+        if (!container) return;
+        const results = data?.results || [];
+        container.innerHTML = "";
+        if (!results.length) {
+          container.innerHTML = '<div class="rounded-xl bg-slate-50 p-3 text-sm text-slate-500">No matches yet.</div>';
+          renderSummary(summaryEl, "No results");
+          return;
+        }
+        renderSummary(summaryEl, `${results.length} results`);
+        results.forEach((item) => {
+          const card = document.createElement("div");
+          const text = item.text ? String(item.text).slice(0, 120) : "";
+          card.className = "rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600";
+
+          const header = document.createElement("div");
+          header.className = "flex items-center justify-between";
+
+          const idEl = document.createElement("div");
+          idEl.className = "font-semibold text-slate-800";
+          idEl.textContent = item.id || "unknown";
+
+          const typeEl = document.createElement("div");
+          typeEl.className = "rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] uppercase text-emerald-700";
+          typeEl.textContent = item.type || "text";
+
+          header.appendChild(idEl);
+          header.appendChild(typeEl);
+
+          const scoreEl = document.createElement("div");
+          scoreEl.className = "mt-1 text-[11px] text-slate-500";
+          scoreEl.textContent = `Score: ${Number(item.score || 0).toFixed(4)}`;
+
+          const textEl = document.createElement("div");
+          textEl.className = "mt-2 text-[12px] text-slate-600";
+          textEl.textContent = text || "No snippet available";
+
+          card.appendChild(header);
+          card.appendChild(scoreEl);
+          card.appendChild(textEl);
+          container.appendChild(card);
+        });
+      }
+
+      async function listNamespaces() {
+        const data = await apiFetch("/admin/namespaces");
+        const namespaces = data.namespaces || [];
+        renderSummary(elements.quickSummary, renderNamespaceList(namespaces));
+        if (elements.quickNamespaces) {
+          elements.quickNamespaces.innerHTML = "";
+          namespaces.forEach((name) => {
+            const pill = document.createElement("span");
+            pill.className =
+              "rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700";
+            pill.textContent = name;
+            elements.quickNamespaces.appendChild(pill);
+          });
+        }
+        renderOutput(elements.quickOutput, data);
+      }
+
+      async function getNamespaceStats() {
+        const namespace = elements.statsNs.value || elements.nsName.value || "default";
+        const params = new URLSearchParams({ namespace });
+        if (elements.statsIncludeTraining.checked) {
+          params.set("include_training_stats", "1");
+        }
+        const data = await apiFetch(`/admin/namespace?${params.toString()}`);
+        const totals = data.totals || data.counts || {};
+        elements.statsDocs.textContent = totals.docs_total ?? "—";
+        elements.statsInIndex.textContent = totals.docs_in_index ?? "—";
+        elements.statsStaging.textContent = totals.staging_vectors ?? "—";
+        elements.statsPool.textContent = totals.training_pool ?? "—";
+        renderSummary(elements.statsSummary, `Stats loaded for ${namespace}`);
+        renderOutput(elements.statsOutput, data);
+      }
+
+      async function createNamespace() {
+        const namespace = elements.nsName.value || "default";
+        const data = await apiFetch("/admin/namespace/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ namespace }),
+        });
+        renderSummary(elements.nsSummary, `Namespace ${namespace} created`);
+        renderOutput(elements.nsOutput, data);
+      }
+
+      async function deleteNamespace() {
+        const namespace = elements.nsName.value || "default";
+        const data = await apiFetch("/admin/namespace", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ namespace }),
+        });
+        renderSummary(elements.nsSummary, `Namespace ${namespace} deleted`);
+        renderOutput(elements.nsOutput, data);
+      }
+
+      async function retrain() {
+        const namespace = elements.retrainNs.value || "default";
+        const lastN = elements.retrainLastN.value.trim();
+        const payload = { namespace };
+        if (lastN) {
+          payload.last_n = parseInt(lastN, 10);
+        }
+        const data = await apiFetch("/admin/retrain", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        renderSummary(elements.retrainSummary, `Retrain requested for ${namespace}`);
+        renderOutput(elements.retrainOutput, data);
+      }
+
+      async function health() {
+        const data = await apiFetch("/health");
+        renderSummary(elements.quickSummary, data.ok ? "Router healthy" : "Router not healthy");
+        renderOutput(elements.quickOutput, data);
+      }
+
+      async function insertText() {
+        const namespace = elements.insertTextNs.value || "default";
+        let id = elements.insertTextId.value.trim();
+        const text = elements.insertTextValue.value.trim();
+        if (!id) {
+          id = `doc_${Math.random().toString(16).slice(2, 10)}`;
+          elements.insertTextId.value = id;
+        }
+        const metadata = buildMetadata(
+          elements.insertTextTags.value,
+          elements.insertTextSource.value,
+          elements.insertTextMeta.value.trim()
+        );
+        const data = await apiFetch("/insert", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ namespace, id, text, metadata }),
+        });
+        const result = data?.response?.result || {};
+        const stored = result.stored ? `stored in ${result.stored}` : "inserted";
+        renderSummary(elements.insertTextSummary, `${id} ${stored}`);
+        renderOutput(elements.insertTextOutput, data);
+      }
+
+      async function insertImage() {
+        const namespace = elements.insertImageNs.value || "default";
+        let id = elements.insertImageId.value.trim();
+        const file = elements.insertImageFile.files[0];
+        if (!id) {
+          id = `img_${Math.random().toString(16).slice(2, 10)}`;
+          elements.insertImageId.value = id;
+        }
+        const metadata = buildMetadata(
+          elements.insertImageTags.value,
+          elements.insertImageSource.value,
+          elements.insertImageMeta.value.trim()
+        );
+        const text = elements.insertImageText.value.trim();
+        const form = new FormData();
+        form.append("namespace", namespace);
+        form.append("id", id);
+        if (text) {
+          form.append("text", text);
+        }
+        if (Object.keys(metadata).length) {
+          form.append("metadata", JSON.stringify(metadata));
+        }
+        if (file) {
+          form.append("image", file);
+        }
+        const data = await apiFetch("/insert", { method: "POST", body: form });
+        const result = data?.response?.result || {};
+        const stored = result.stored ? `stored in ${result.stored}` : "inserted";
+        renderSummary(elements.insertImageSummary, `${id} ${stored}`);
+        renderOutput(elements.insertImageOutput, data);
+      }
+
+      async function searchText() {
+        const namespace = elements.searchTextNs.value || "default";
+        const query = elements.searchTextQuery.value.trim();
+        const topK = elements.searchTextTopK.value.trim();
+        const nprobe = elements.searchTextNprobe.value.trim();
+        const payload = { namespace, query };
+        if (topK) payload.top_k = parseInt(topK, 10);
+        if (nprobe) payload.nprobe = parseInt(nprobe, 10);
+        const data = await apiFetch("/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        renderSearchResults(data, elements.searchTextResults, elements.searchTextSummary);
+        renderOutput(elements.searchTextOutput, data);
+      }
+
+      async function searchImage() {
+        const namespace = elements.searchImageNs.value || "default";
+        const topK = elements.searchImageTopK.value.trim();
+        const nprobe = elements.searchImageNprobe.value.trim();
+        const file = elements.searchImageFile.files[0];
+        const form = new FormData();
+        form.append("namespace", namespace);
+        if (topK) form.append("top_k", topK);
+        if (nprobe) form.append("nprobe", nprobe);
+        if (file) form.append("image", file);
+        const data = await apiFetch("/search/image", { method: "POST", body: form });
+        renderSearchResults(data, elements.searchImageResults, elements.searchImageSummary);
+        renderOutput(elements.searchImageOutput, data);
+      }
+
+      async function deleteDoc() {
+        const namespace = elements.deleteNs.value || "default";
+        const id = elements.deleteId.value.trim();
+        const data = await apiFetch("/delete", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ namespace, id }),
+        });
+        renderSummary(elements.deleteSummary, `Deleted ${id}`);
+        renderOutput(elements.deleteOutput, data);
+      }
+
+      async function listDocs() {
+        const namespace = elements.docsNs.value || "default";
+        const limit = elements.docsLimit.value.trim() || "50";
+        const shard = elements.docsShard.value.trim() || "0";
+        const params = new URLSearchParams({ namespace, limit, shard });
+        if (state.docsAfterId) {
+          params.set("after_id", state.docsAfterId);
+        }
+        if (elements.docsIncludeText.checked) {
+          params.set("include_text", "1");
+        }
+        if (elements.docsIncludeMeta.checked) {
+          params.set("include_metadata", "1");
+        }
+        const data = await apiFetch(`/admin/namespace/docs?${params.toString()}`);
+        renderDocsTable(data);
+      }
+
+      function renderDocsTable(data) {
+        if (data?.mode === "per_shard") {
+          elements.docsTable.innerHTML =
+            '<tr><td class="px-3 py-3 text-sm text-slate-500" colspan="5">Select a shard number to page Records.</td></tr>';
+          state.docsNextAfterId = null;
+          elements.docsCursor.textContent = state.docsAfterId || "none";
+          return;
+        }
+        const direct = data?.docs ? data : null;
+        const shardResp = data?.response?.response || null;
+        const rows = direct?.docs || shardResp?.docs || [];
+        elements.docsTable.innerHTML = "";
+        if (!rows.length) {
+          elements.docsTable.innerHTML =
+            '<tr><td class="px-3 py-3 text-sm text-slate-500" colspan="5">No Records found.</td></tr>';
+        }
+        rows.forEach((doc) => {
+          const tr = document.createElement("tr");
+          const cells = [
+            doc.id || "-",
+            doc.type || "-",
+            doc.in_index,
+            doc.faiss_id ?? "-",
+            doc.updated_at || "-",
+          ];
+          cells.forEach((value) => {
+            const td = document.createElement("td");
+            td.className = "px-3 py-2";
+            td.textContent = String(value);
+            tr.appendChild(td);
+          });
+          elements.docsTable.appendChild(tr);
+        });
+
+        const next = direct?.next_after_id || shardResp?.next_after_id || null;
+        state.docsNextAfterId = next;
+        elements.docsCursor.textContent = state.docsAfterId || "none";
+      }
+
+      function nextDocs() {
+        if (!state.docsNextAfterId) return;
+        state.docsStack.push(state.docsAfterId);
+        state.docsAfterId = state.docsNextAfterId;
+        listDocs();
+      }
+
+      function prevDocs() {
+        if (!state.docsStack.length) return;
+        state.docsAfterId = state.docsStack.pop() || null;
+        listDocs();
+      }
+
+      function generateId() {
+        elements.insertTextId.value = `doc_${Math.random().toString(16).slice(2, 10)}`;
+      }
+
+      document.getElementById("saveBaseUrl").addEventListener("click", () => {
+        localStorage.setItem("vectorDbBaseUrl", getBaseUrl());
+        updateCorsWarning();
+        setStatus("Base URL saved");
+      });
+
+      document.querySelectorAll("[data-action]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const action = btn.getAttribute("data-action");
+          try {
+            setStatus(`Running ${action}...`);
+            switch (action) {
+              case "listNamespaces":
+                await listNamespaces();
+                break;
+              case "getNamespaceStats":
+                await getNamespaceStats();
+                break;
+              case "createNamespace":
+                await createNamespace();
+                break;
+              case "deleteNamespace":
+                await deleteNamespace();
+                break;
+              case "retrain":
+                await retrain();
+                break;
+              case "health":
+                await health();
+                break;
+              case "genId":
+                generateId();
+                break;
+              case "insertText":
+                await insertText();
+                break;
+              case "insertImage":
+                await insertImage();
+                break;
+              case "searchText":
+                await searchText();
+                break;
+              case "searchImage":
+                await searchImage();
+                break;
+              case "deleteDoc":
+                await deleteDoc();
+                break;
+              case "listDocs":
+                await listDocs();
+                break;
+              case "nextDocs":
+                await nextDocs();
+                break;
+              case "prevDocs":
+                await prevDocs();
+                break;
+              default:
+                break;
+            }
+            setStatus(`Done: ${action}`);
+          } catch (err) {
+            setStatus(`Error: ${action}`, false);
+            const message = err instanceof Error ? err.message : String(err);
+            renderSummary(elements.quickSummary, `Error: ${message}`);
+            renderOutput(elements.quickOutput, { error: message });
+          }
+        });
+      });
+
+      function init() {
+        const stored = localStorage.getItem("vectorDbBaseUrl");
+        if (stored) {
+          elements.baseUrl.value = stored;
+        } else {
+          elements.baseUrl.value = "http://localhost:5001";
+        }
+        elements.docsShard.value = "0";
+        updateCorsWarning();
+      }
+
+      init();
+    </script>
+  </body>
+</html>
